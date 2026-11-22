@@ -234,6 +234,41 @@ def test_raw_item_resolves_to_material_for_balloon_level():
     assert (mode, resolved) == ("material", "PanFriedPrawns")
 
 
+def test_prepare_scope_is_full_material_chain():
+    """prepare（备料）= 该物料完整链：取→切→下锅→装盘，不含送餐。"""
+    from ai.dialog.command_queue import build_scope, material_chain_scope
+    from ai.dialog.catalog import Kitchen, Material
+
+    kitchen = Kitchen({}, {})
+    kitchen.materials = {
+        "FriedChickenNuggets": Material(
+            "FriedChickenNuggets",
+            items={"nuggetchicken", "friedchickennuggets"},
+            types={"FetchToBoard", "Chop", "FetchToCooker", "TakeCookedToPlate"},
+            steps=[("FetchToBoard", "NuggetChicken"),
+                   ("Chop", "NuggetChicken"),
+                   ("FetchToCooker", "FriedChickenNuggets"),
+                   ("TakeCookedToPlate", "FriedChickenNuggets")]),
+    }
+
+    expected = frozenset({
+        ("FetchToBoard", "nuggetchicken"),
+        ("Chop", "nuggetchicken"),
+        ("FetchToCooker", "friedchickennuggets"),
+        ("TakeCookedToPlate", "friedchickennuggets"),
+    })
+    assert material_chain_scope(kitchen, "FriedChickenNuggets") == expected
+
+    scope, reason = build_scope(kitchen, "prepare", "FriedChickenNuggets",
+                                "material")
+    assert reason == ""
+    assert scope == expected
+
+    # dish 目标（整道菜）被拒：物料级 prepare 只认 material。
+    scope, reason = build_scope(kitchen, "prepare", "SomeDish", "dish")
+    assert scope is None and "物料" in reason
+
+
 def test_scope_empty_keeps_active_task_in_command_scope(agent, world):
     """命令 scope 暂时没候选时，正在跑的同 scope 树不能切走。
 

@@ -11,11 +11,11 @@
 送餐和洗盘不在分工里：它们谁近谁做，交给 planner 自由选。
 """
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from ai.dialog.action_defs import (ACTION_STATION_TYPES, ACTION_TOOL_NAMES,
-                               DIVISION_ACTIONS, TOOL_ACTION_NAMES,
-                               action_scope)
+                               DIVISION_ACTIONS, DIVISION_TASK_TYPES,
+                               TOOL_ACTION_NAMES, action_scope, carry_for)
 from ai.dialog.schema import Preference
 from ai.query import predicates as P
 
@@ -126,21 +126,81 @@ class DivisionState(object):
                 parts.append("%s负责 %s" % (label, "、".join(actions)))
         return "；".join(parts)
 
-    def preferences(self):
-        # type: () -> List[Preference]
+    def overlapping_actions(self):
+        # type: () -> List[str]
+        """有「动作级 + 物料级」条目并存的英文动作名。
+
+        物料级条目会覆盖动作级条目对相应物料的归属（见 preferences() 的
+        exclude）；这里只用于在 set_division 返回里给模型提个醒——细化分工
+        却漏了 clear 时会产生这种并存。
+        """
+        has_generic = set()   # type: set
+        has_specific = set()  # type: set
+        for entry in self.entries:
+            (has_specific if entry.item else has_generic).add(entry.tool_action())
+        return sorted(has_generic & has_specific)
+
+    def preferences(self, carry_map=None, material_steps=None,
+                    material_items=None):
+        # type: (Optional[Dict[str, FrozenSet[str]]], Optional[Dict[str, FrozenSet[Tuple[str, str]]]], Optional[Dict[str, FrozenSet[str]]]) -> List[Preference]
         """编译成 planner 的偏好：只给玩家负责的动作扣分。
 
         分给你自己的动作**不加分**（见 WEIGHT_CLAIM 上方注释）；BOTH 两边都
         不产生偏好。
+
+        - `carry_map`：DAG 派生的「加工步 → 搬运步」表，让「切 → player」也把
+          取料上砧板（FetchToBoard）一起扣分；
+        - `material_steps` / `material_items`：物料名 → 整链 (task, item) / 整链
+          item 集合，供「prepare → player」按整链扣分、并让 prepare 覆盖细粒度
+          动作（chop/cook/mix）。
         """
+        # 被 prepare 接管的物料整链 item（小写）：从所有细粒度动作的 claim 里
+        # exclude 掉，实现「prepare 覆盖 chop/cook/mix」。
+        prepare_items = set()  # type: set
+        for entry in self.entries:
+            if entry.action == "备料" and entry.item:
+                prepare_items |= set((material_items or {}).get(
+                    entry.item.lower(), (entry.item.lower(),)))
+
+        # 同动作的物料级条目接管泛化条目（specific 覆盖 generic）。
+        specific_items = {}  # type: Dict[str, set]
+        for entry in self.entries:
+            if entry.item:
+                specific_items.setdefault(entry.action, set()).add(entry.item)
+
         out = []  # type: List[Preference]
         for entry in self.entries:
             if entry.owner != OWNER_PLAYER:
                 continue
+            if entry.action == "备料":
+                # 整链 scope：该物料全部 steps（含装盘/载体）。
+                scope = frozenset((material_steps or {}).get(
+                    entry.item.lower(), frozenset()))
+                out.append(Preference(kind="claim", owner=OWNER_PLAYER,
+                                      weight=WEIGHT_CLAIM, scope=scope))
+                continue
+            if entry.item and entry.item in prepare_items:
+                # 这个物料级细粒度条目整条被 prepare 接管：直接跳过，不生成
+                # 一条 scope 全被 exclude 掉的死偏好。
+                continue
+            carry = None
+            if carry_map is not None:
+                carry = carry_for(DIVISION_TASK_TYPES[entry.action], carry_map)
+            exclude = frozenset()  # type: FrozenSet[Tuple[Optional[str], Optional[str]]]
+            if not entry.item:
+                items = specific_items.get(entry.action)
+                if items:
+                    exclude = frozenset(
+                        pair for item in items
+                        for pair in action_scope(entry.action, item, carry))
+            if prepare_items:
+                exclude = exclude | frozenset((None, it) for it in prepare_items)
             out.append(Preference(kind="claim", owner=OWNER_PLAYER,
                                   weight=WEIGHT_CLAIM,
                                   scope=action_scope(entry.action,
-                                                     entry.item or None)))
+                                                     entry.item or None,
+                                                     carry),
+                                  exclude=exclude))
         return out
 
     def copy(self):
@@ -170,11 +230,17 @@ def diff_entries(old, new):
 
 def tool_actions(stations):
     # type: (Any) -> List[str]
-    """本关可分工的英文动作名；没有对应站点的不进 enum，送餐/洗盘永不进。"""
+    """本关可分工的英文动作名；没有对应站点的不进 enum，送餐/洗盘永不进。
+
+    备料（prepare）是物料级整链，不绑单一站点，恒常驻。
+    """
     present = {str(s.get("t")) for s in (stations or ())
                if isinstance(s, dict)}
-    return [ACTION_TOOL_NAMES[action] for action in DIVISION_ACTIONS
-            if ACTION_STATION_TYPES[action] in present]
+    out = []  # type: List[str]
+    for action in DIVISION_ACTIONS:
+        if action == "备料" or ACTION_STATION_TYPES[action] in present:
+            out.append(ACTION_TOOL_NAMES[action])
+    return out
 
 
 def _q(value, scale=1.0):
@@ -205,6 +271,8 @@ def station_signature(world):
     moving = _moving_grids(world)
     parts = []  # type: List[Tuple]
     for action in DIVISION_ACTIONS:
+        if action == "备料":          # 物料级整链，不绑单一站点，不进拓扑签名
+            continue
         station_type = ACTION_STATION_TYPES[action]
         for station in getattr(world, "stations", None) or ():
             if not isinstance(station, dict) or station.get("t") != station_type:
@@ -236,6 +304,8 @@ def reach_signature(world, bb):
 
     out = []  # type: List[Tuple[str, bool, bool]]
     for action in DIVISION_ACTIONS:
+        if action == "备料":          # 物料级整链，不绑单一站点
+            continue
         station_type = ACTION_STATION_TYPES[action]
         stations = [s for s in (getattr(world, "stations", None) or ())
                     if isinstance(s, dict) and s.get("t") == station_type]
@@ -315,13 +385,24 @@ def validate_entry(world, bb, kitchen, book, action_tool, owner_tool,
     owner = TOOL_OWNER_NAMES.get(str(owner_tool or "").strip())
     if owner is None:
         return False, "owner 只能是 you / player / both", ""
+
+    item_l = str(item or "").strip().lower()
+    if action == "备料":
+        # 物料级整链：必须带 item，item 是本关真实物料；不绑单一站点，不查站。
+        if not item_l:
+            return False, "prepare 要带 item（本关目录里的物料英文名）", ""
+        known = _known_materials(kitchen, world)
+        if known and item_l not in known:
+            hint = "；可用：%s" % "、".join(sorted(known.values())) if known else ""
+            return False, "本关没有物料 %s%s" % (item, hint), ""
+        return True, "", ""
+
     station_type = ACTION_STATION_TYPES[action]
     stations = [s for s in (getattr(world, "stations", None) or ())
                 if isinstance(s, dict) and s.get("t") == station_type]
     if not stations:
         return False, "本关没有%s这个动作" % (action,), ""
 
-    item_l = str(item or "").strip().lower()
     if item_l:
         known = _known_materials(kitchen, world)
         if known and item_l not in known:

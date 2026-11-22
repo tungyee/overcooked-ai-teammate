@@ -132,7 +132,7 @@ def test_initial_division_event_and_context(agent, worker):
     assert "set_division" in tools and "read_cookbook" in tools
     assert tools["set_division"]["function"]["parameters"]["properties"][
         "assignments"]["items"]["properties"]["action"]["enum"] == [
-            "chop", "cook"]
+            "chop", "cook", "prepare"]
 
 
 def test_kitchen_uses_level_dishes_for_full_menu(agent):
@@ -270,6 +270,28 @@ def test_set_division_applies_and_weights(agent, worker):
     # 只给玩家那边扣分；分给你的动作不加分（避免自己的活压过更值钱的事）
     kinds = {(p.kind, p.owner, p.weight) for p in agent.bb.preferences}
     assert kinds == {("claim", "P1", -6.0)}
+
+
+def test_set_division_assignments_replace_action(agent):
+    """assignments 列出的动作整体替换：加物料级条目时不用先 clear 泛化条目。"""
+    world = make_world()
+    world.recipes = [{"name": "Meat", "comp": [],
+                      "chop": "ChoppedMeat", "chop_stages": 3}]
+    agent.book = RecipeBook(world.recipes, world.stations)
+    # 先设泛化 chop→player
+    agent._apply_duty_batch(world, _batch(
+        ("set_division", {"assignments": [{"action": "chop", "owner": "player"}]})))
+    assert agent.bb.division.snapshot()["player"] == ["chop"]
+
+    # 再设物料级 chop:Meat→you（不带 clear）：应整体替换，泛化 chop 消失
+    result = agent._apply_duty_batch(world, _batch(
+        ("set_division", {"assignments": [
+            {"action": "chop", "owner": "you", "item": "Meat"}]})))[0]
+    assert result["ok"] is True
+    assert agent.bb.division.snapshot() == {
+        "you": ["chop:meat"], "player": [], "both": []}
+    # 不再有「泛化 + 物料级」并存，也就不弹 warning
+    assert "warning" not in result
 
 
 def test_set_division_is_resident_and_editable_mid_level(agent, worker):

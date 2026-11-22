@@ -12,10 +12,10 @@ from typing import Any, List
 
 # 工具协议的动作枚举（英文标识，内部翻译成中文 key）。
 TOOL_ACTIONS = ["chop", "cook", "mix", "plate", "deliver", "wash", "fetch",
-                "press_switch"]
+                "prepare", "press_switch"]
 # 可分工动作的默认枚举；实际由本关站点过滤（见 agent._division_tool_actions）。
-# 送餐/洗盘/装盘谁近谁做，不在分工里。
-DIVISION_TOOL_ACTIONS = ["chop", "cook", "mix"]
+# 送餐/洗盘/装盘谁近谁做，不在分工里。prepare（备料）是物料级整链，必须带 item。
+DIVISION_TOOL_ACTIONS = ["chop", "cook", "mix", "prepare"]
 COOKBOOK_SECTIONS = ["summary", "division", "mechanics", "traps", "recipes", "all"]
 
 
@@ -28,13 +28,14 @@ def _execute_actions_schema():
             "动作标识：chop 切（会自动取料上砧板）/ cook 煮炸烤下锅（需要先切会自动切）"
             "/ mix 拌 / plate 装盘（铺/放/摆料也是 plate，target 填该料名，例如 Seaweed；"
             "料没准备好会失败，不会替你切/煮）/ deliver 送餐 / wash 洗盘 / "
-            "fetch 取料（把料拿到下一步要用的地方）/ press_switch 按方向开关"
-            "（把传送带方向调向自己，对方要送盘/料过来时用）"
+            "fetch 取料（把料拿到下一步要用的地方）/ prepare 备料（把某一种物料"
+            "从头做到能装盘：取料→切→下锅→装盘，target 填该物料英文名）/ "
+            "press_switch 按方向开关（把传送带方向调向自己，对方要送盘/料过来时用）"
         ),
     }
     target_prop = {
         "type": "string",
-        "description": "物料名或菜名，使用本关目录里的英文名（Cucumber、Seaweed、BoiledSushiRice、Sushi_Cucumber）。chop / cook 必填；deliver / wash 可省略；省略时系统会选当前最合适的一个。",
+        "description": "物料名或菜名，使用本关目录里的英文名（Cucumber、Seaweed、BoiledSushiRice、Sushi_Cucumber）。chop / cook / prepare 必填；deliver / wash 可省略；省略时系统会选当前最合适的一个。",
     }
     return {
         "type": "function",
@@ -130,15 +131,14 @@ def _set_division_schema(actions):
         "function": {
             "name": "set_division",
             "description": (
-                "设置或调整长期分工：把某一类动作（可按物料细分）归给你或玩家。"
+                "设置或调整长期分工：把某一类动作归给你或玩家。"
                 "只影响没有明确命令时的自主选活，不会取消正在执行的命令。"
-                "只包含本关可分工的动作；"
-                "送餐/洗盘/装盘谁近谁做，不在分工里。开局先看【本关地图】"
-                "（自然语言：你和玩家各出生在哪侧、挨着什么站点）判断谁在砧板/灶/料箱旁，攻略只当参考。"
-                "同一动作分物料时在 item 里写物料名"
-                "（例如 chop Meat 给玩家、chop Lettuce 给你，但只是示例，必须换成本关"
-                "攻略/目录里的物料）；两人都要做、又分不清物料的动作整个不写，"
-                "不要写成一个人的动作级分工；不确定的动作不要写。"
+                "玩家说「你负责X / 我负责Y」（＝X 这一种料从头做到位：取料→切→下锅→装盘都归谁）时，"
+                "用 prepare 加 item。例：「你负责鸡肉、我负责土豆」→ prepare NuggetChicken 给你、prepare Potato 给玩家。"
+                "只说「你切X / 你下锅Y」这种单步动作时，才用 chop / cook / mix。"
+                "送餐/洗盘/装盘谁近谁做，不在分工里。列出的动作会整体替换为新的分工；"
+                "两人都要做、又分不清物料的动作整个不写；不确定的动作不要写。"
+                "开局先看【本关地图】判断谁在砧板/灶/料箱旁，攻略只当参考。"
                 "如果【本关地图】和【本关攻略】都没有，不要调用本工具。"
             ),
             "parameters": {
@@ -157,21 +157,12 @@ def _set_division_schema(actions):
                                 },
                                 "item": {
                                     "type": "string",
-                                    "description": "可选：同一动作分物料时填，例如 Meat / Lettuce / Cheese；只填本关目录里真实存在的物料名。",
+                                    "description": "同一动作分物料时填，例如 Meat / Lettuce / Cheese；只填本关目录里真实存在的物料名。action=prepare（备料，把某一种料从头做到装盘）必须带 item；chop / cook / mix 可选。",
                                 },
                             },
                             "required": ["action", "owner"],
                         },
-                        "description": "要设置的动作归属；没列出的动作保持不变。",
-                    },
-                    "clear": {
-                        "type": "array",
-                        "items": {"type": "string", "enum": actions},
-                        "description": "要清掉的动作归属。",
-                    },
-                    "clear_all": {
-                        "type": "boolean",
-                        "description": "清空全部分工。",
+                        "description": "要设置的动作归属；列出的动作会整体替换为新分工（覆盖旧条目），没列出的动作保持不变。",
                     },
                 },
             },
