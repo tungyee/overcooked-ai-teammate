@@ -340,7 +340,7 @@ class Primitive(Node):
                         from ai.space import occupancy as O
                         box = (float(r["blocked_box"][0]), float(r["blocked_box"][1]),
                                float(r["blocked_box"][2]), float(r["blocked_box"][3]))
-                        cells = O._box_cells(box, w.to_grid, w.to_world)
+                        cells = O.blocked_box_cells(box, w.to_grid, w.to_world)
                         ctx.setdefault("motion_failure", {}).update(
                             reason="blocked", blocked_cells=sorted(cells),
                             blocked_kind=r.get("blocked_kind") or "obstacle")

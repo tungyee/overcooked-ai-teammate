@@ -180,6 +180,25 @@ def _box_cells(box, to_grid, to_world):
     return out
 
 
+def blocked_box_cells(box, to_grid, to_world):
+    # type: (Tuple[float, float, float, float], Callable, Callable) -> Set[Tuple[int, int]]
+    """碰撞回传 blocked 时该拉黑的格子：障碍物自身格子 ∪ 一圈贴身邻格。
+
+    _box_cells 只按「格心落在 AABB 外扩 CHEF_CLEARANCE 内」取格子，会漏掉
+    「格心离障碍物 0.39m、点判可走但厨师实体塞不进」的贴身缝——插件
+    SweepForward 按移动方向前瞻 BLOCK_PROBE=0.4m，缝格必然撞上报 blocked
+    （trace-20261119-002630：P2 卡在篮子中央柱子正南 0.39m 的缝上反复
+    blocked）。拉黑时多外扩一圈邻格，把这些缝一起拉黑，重绕才能真正绕开。
+    """
+    cells = _box_cells(box, to_grid, to_world)
+    out = set(cells)  # type: Set[Tuple[int, int]]
+    for gx, gz in cells:
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                out.add((gx + dx, gz + dz))
+    return out
+
+
 def _support_station(entry, stations):
     # type: (Dict, Optional[List[Dict]]) -> Optional[Dict]
     """承载 entry（盘/散锅/散料）的站点：x/z 落在其 AABB 内，取中心最近的。"""
@@ -749,6 +768,57 @@ def parse_wind_zones(wind_list):
         except (TypeError, ValueError):
             continue
     return out
+
+
+def wind_between(wind_zones, a, b):
+    # type: (Optional[List[Dict]], Optional[Tuple[float, float]], Optional[Tuple[float, float]]) -> bool
+    """线段 a→b 是否横穿「正在起风」的风区（2D x-z 平面，忽略高度）。
+
+    投掷路径穿风时，风会把料吹偏、落不到目标；调用方（throw_supply.mode_for）
+    据此退回「走过去」而不是投（4-4 风口，trace-20261118-221017）。风没起
+    （vx/vz 都为零）的风区不算。
+    """
+    if not wind_zones or a is None or b is None:
+        return False
+    ax, az = a[0], a[1]
+    bx, bz = b[0], b[1]
+    for wz in wind_zones:
+        if not isinstance(wz, dict):
+            continue
+        try:
+            vx = float(wz.get("vx") or 0)
+            vz = float(wz.get("vz") or 0)
+            minx = float(wz["minx"]); maxx = float(wz["maxx"])
+            minz = float(wz["minz"]); maxz = float(wz["maxz"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if abs(vx) + abs(vz) <= 0:
+            continue
+        if _seg_intersects_rect(ax, az, bx, bz, minx, maxx, minz, maxz):
+            return True
+    return False
+
+
+def _seg_intersects_rect(ax, az, bx, bz, minx, maxx, minz, maxz):
+    # type: (float, float, float, float, float, float, float, float) -> bool
+    """2D 线段与 AABB 相交（slab 法，含端点）。"""
+    dx = bx - ax
+    dz = bz - az
+    t0, t1 = 0.0, 1.0
+    for d, lo, hi, p in ((dx, minx, maxx, ax), (dz, minz, maxz, az)):
+        if abs(d) < 1e-9:
+            if p < lo or p > hi:
+                return False
+        else:
+            ta = (lo - p) / d
+            tb = (hi - p) / d
+            if ta > tb:
+                ta, tb = tb, ta
+            t0 = max(t0, ta)
+            t1 = min(t1, tb)
+            if t0 > t1:
+                return False
+    return True
 
 
 def parse_belts(belts_list):

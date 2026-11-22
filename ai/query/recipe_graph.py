@@ -556,7 +556,10 @@ def _inst_fetch_board(node, ctx):
     """空板各一个候选；P2 够得着的空板一块都没有时，再给「板上东西可挪走」
     的板发候选（FetchToBoard 先腾板再放料，判据见 T.board_clearable）。
 
-    有空板就不腾：腾板多跑一趟，只在没板可用时才值得。"""
+    有空板就不腾：腾板多跑一趟，只在没板可用时才值得。
+    多块空板都够得着时，按离 P2 的行走距离就近排——同分平手靠候选顺序决胜，
+    不排会按插件枚举顺序舍近求远（trace-20261118-224142 t=142）。
+    """
     from ai.space import reachability
     world, bb = ctx["world"], ctx["bb"]
     item = node["item"]
@@ -565,22 +568,48 @@ def _inst_fetch_board(node, ctx):
         if _claimed(name, "fetch_to", bb):
             continue
         (occupied if board_item else free).append(name)
-    names = list(free)
     rctx = reachability.context(world, bb)
-    if not any(_board_reachable(rctx, n) for n in free):
-        names += [n for n in occupied
-                  if T.board_clearable(world, ctx["book"], bb, n)]
+    reachable = [n for n in free if _board_reachable(rctx, n)]
+    if reachable:
+        names = _boards_by_walk_cost(rctx, reachable)
+    else:
+        names = [n for n in occupied
+                 if T.board_clearable(world, ctx["book"], bb, n)]
     return [T.FetchToBoard(ctx["order_id"], (n,), item) for n in names]
+
+
+def _board_station(world, name):
+    # type: (Any, str) -> Optional[Dict]
+    """按名取切菜板站点 dict（stations 权威；workstations 只在单测兜底）。"""
+    for st in world.stations:
+        if st.get("t") in ("board", "chopping") and \
+                P.station_name_matches(str(st.get("n") or ""), name):
+            return st
+    return None
 
 
 def _board_reachable(rctx, name):
     # type: (Dict, str) -> bool
     from ai.space import reachability
-    for st in rctx["w"].stations:
-        if st.get("t") in ("board", "chopping") and \
-                P.station_name_matches(str(st.get("n") or ""), name):
-            return reachability.can_interact(rctx, st)
-    return True        # 站点表里没有（部分单测只给 workstations）：按旧口径算可用
+    st = _board_station(rctx["w"], name)
+    if st is None:
+        return True        # 站点表里没有（部分单测只给 workstations）：按旧口径算可用
+    return reachability.can_interact(rctx, st)
+
+
+def _boards_by_walk_cost(rctx, names):
+    # type: (Dict, List[str]) -> List[str]
+    """按 P2 到每块板的行走代价（可达场步数）升序；无可达场/站表缺板时保持原序。"""
+    from ai.space import reachability
+
+    def cost(name):
+        # type: (str) -> Optional[int]
+        st = _board_station(rctx["w"], name)
+        if st is None:
+            return None
+        return reachability.interact_cost(rctx, st)
+
+    return sorted(names, key=lambda n: (cost(n) is None, cost(n)))
 
 
 def _inst_chop(node, ctx):

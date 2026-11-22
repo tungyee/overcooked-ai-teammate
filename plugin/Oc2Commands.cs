@@ -57,10 +57,6 @@ namespace Oc2AI
             {
                 if (NameMatchesStrict(f.PlacementName, tname))
                     return true;
-                if (tgx.HasValue && tgz.HasValue && f.PlacementGx > -9000f
-                    && Mathf.Abs(f.PlacementGx - (float)tgx.Value) < 0.1f
-                    && Mathf.Abs(f.PlacementGz - (float)tgz.Value) < 0.1f)
-                    return true;
                 // 盘堆上的盘：placement 句柄可能被同一沥水架的洗碗池抢走
                 // （trace-20261108-174744 t=2117：目标盘在 DryingPart(-7,0)、
                 // 句柄 WashingPart(-7,-1)）。游戏 PlaceHeldItem 走
@@ -73,6 +69,14 @@ namespace Oc2AI
                     && Mathf.Abs(f.GridGx - (float)tgx.Value) < 0.1f
                     && Mathf.Abs(f.GridGz - (float)tgz.Value) < 0.1f)
                     return true;
+                // 坐标兜底（与 pickup 同款）：有坐标就按格比对并 return 结果
+                // （含 false），只有没坐标才退宽松 NamesMatch。否则带实例号的
+                // 柜台（"... (1)"）会被子串匹配误判成无实例号的目标
+                // （trace-20261118-233529：放下盘子时朝被占柜台反复按、
+                // 报 no effect 死循环）。
+                if (tgx.HasValue && tgz.HasValue && f.PlacementGx > -9000f)
+                    return Mathf.Abs(f.PlacementGx - (float)tgx.Value) < 0.1f
+                        && Mathf.Abs(f.PlacementGz - (float)tgz.Value) < 0.1f;
                 return NamesMatch(f.PlacementName, tname);
             }
             // kind=null：通用朝向句柄（m_gridLocation）——盛饭/倒料等端盘面对

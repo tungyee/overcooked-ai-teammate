@@ -272,6 +272,10 @@ def mode_for(world, dest, srcs, bb=None, consumer=None):
         # （trace-20261110-115339 t=591）。这种距离不算「远投」。
         if traffic.road_between(world, a, b):
             continue
+        if O.wind_between(getattr(world, "wind_zones", None), a, b):
+            # 投掷路径穿风：料会被吹偏、落不到目标，退回走过去别投
+            # （4-4 风口，trace-20261118-221017）。
+            continue
         if math.hypot(a[0] - b[0], a[1] - b[1]) >= THROW_MIN_DIST:
             return MODE_FAR
     return None
