@@ -466,3 +466,54 @@ def test_trace_back_on_real_frame_all_reachable_cells(level_frame):
             assert abs(a[0] - b[0]) + abs(a[1] - b[1]) == 1
             assert w.walkable(b[0], b[1])
             assert field[a] + N.step_cost(w.belt_dir, a, b) == field[b]
+
+
+# ---------- 出餐口背面方向（插件 0.25 plate_station.back_x/back_z） ----------
+
+def _mine46_walkable(extra_blocked=()):
+    """Mine_4_6 出餐口一带（trace-20261122-234409）：占地 (4,5)/(5,5)，
+    南面是厨房（正面），北面 (4,6)/(5,6) 是背板后的窄缝。"""
+    blocked = {(4, 5), (5, 5), (3, 5), (6, 5)} | set(extra_blocked)
+    return lambda gx, gz: 0 <= gx <= 10 and -3 <= gz <= 6 \
+        and (gx, gz) not in blocked
+
+
+def test_hatch_back_picks_front_row_opposite_block_back():
+    from ai.space.navigation import hatch_front_cells
+    cells = hatch_front_cells({(4, 5), (5, 5)}, (0.0, 1.0), _mine46_walkable())
+    assert cells == [(4, 4), (5, 4)]
+
+
+def test_hatch_back_fire_in_front_only_drops_that_cell():
+    """正面 (5,4) 落火：只剔除该格，不改判背面（实机两趟送餐卡在侧面）。"""
+    walk = _mine46_walkable(extra_blocked={(5, 4)})
+    cells = serving_hatch_interact_cells({(4, 5), (5, 5)}, walk,
+                                         back=(0.0, 1.0))
+    assert cells == [(4, 4)]
+
+
+def test_hatch_back_front_fully_blocked_returns_empty_not_back_side():
+    walk = _mine46_walkable(extra_blocked={(4, 4), (5, 4)})
+    cells = serving_hatch_interact_cells({(4, 5), (5, 5)}, walk,
+                                         back=(0.0, 1.0))
+    assert cells == []
+
+
+def test_hatch_back_vertical_hatch():
+    from ai.space.navigation import hatch_front_cells
+    walk = lambda gx, gz: (gx, gz) not in {(1, 0), (1, 1)}
+    # 背板朝西（-x）→ 正面在东侧
+    assert hatch_front_cells({(1, 0), (1, 1)}, (-1.0, 0.0), walk) == [(2, 0), (2, 1)]
+
+
+def test_hatch_depth_fallback_measures_every_column():
+    """旧帧无 back：只量中间列会被那一列前方的落火骗；每列取最大深度。"""
+    walk = _mine46_walkable(extra_blocked={(5, 4)})
+    cells = serving_hatch_interact_cells({(4, 5), (5, 5)}, walk)
+    assert cells == [(4, 4)]
+
+
+def test_hatch_back_reads_station_fields():
+    from ai.space.navigation import hatch_back
+    assert hatch_back({"back_x": 0, "back_z": 1}) == (0.0, 1.0)
+    assert hatch_back({"t": "plate_station"}) is None

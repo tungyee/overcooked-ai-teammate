@@ -82,8 +82,9 @@ def dirty_on_conveyor(world):
 
 
 def build_rules(pressure_fn, plate_pressure_fn, placed_plates_fn,
-                usable_plate_fn=None, plate_total_fn=None):
-    # type: (Callable, Callable, Callable, Optional[Callable], Optional[Callable]) -> Tuple
+                usable_plate_fn=None, plate_total_fn=None,
+                loose_pot_wanted_fn=None):
+    # type: (Callable, Callable, Callable, Optional[Callable], Optional[Callable], Optional[Callable]) -> Tuple
     """构造层序规则表。
 
     表可替换（重排 / 删条），谓词不可替换——谓词里的曲线是实测定标过的，
@@ -94,9 +95,13 @@ def build_rules(pressure_fn, plate_pressure_fn, placed_plates_fn,
     缺省退回 `placed_plates_fn`，保持旧调用点语义。
     `plate_total_fn`：场上盘子总数（含池里/脏盘摞）。缺省 99 = 不启用
     「2 盘关」特殊规则，旧调用/旧测试行为不变。
+    `loose_pot_wanted_fn(task, world)`：散锅回灶后能煮的熟料是否还缺份。
+    缺省恒假（RecoverLoosePot 留 L7）。
     """
     usable_plate_fn = usable_plate_fn or placed_plates_fn
     plate_total_fn = plate_total_fn or (lambda w: 99)
+    # 缺省恒假 = RecoverLoosePot 留在 L7，旧调用/旧测试行为不变。
+    loose_pot_wanted_fn = loose_pot_wanted_fn or (lambda t, w: False)
     return (
         (L_FIRE,         lambda t, w: t.TYPE == "Extinguish"),
         (L_IRREVERSIBLE, lambda t, w: pressure_fn(t, w) >= PRESSURE_IRREVERSIBLE),
@@ -134,7 +139,12 @@ def build_rules(pressure_fn, plate_pressure_fn, placed_plates_fn,
         # 保留这一行（谓词恒假）而不是删掉，是为了让层号与表的行一一对应 ——
         # 将来若真有「有倒计时的产能类动作」，它该插在这里。
         (L_CAPACITY,     lambda t, w: False),
-        (L_PREP,         lambda t, w: t.TYPE in LAYER_PREP_TYPES),
+        (L_PREP,         lambda t, w: (
+            t.TYPE in LAYER_PREP_TYPES
+            # 空锅回灶：这口锅能煮的熟料还缺份时，它就是填灶的前一步，与备菜
+            # 同层按 cooker_idle 竞争；不缺时留在 L7（2-2 实机空锅在台面放
+            # 64~140 秒、L7 一次都没轮到）。
+            or (t.TYPE == "RecoverLoosePot" and loose_pot_wanted_fn(t, w)))),
     )
 
 
@@ -170,11 +180,12 @@ def layer_of_task(task, world):
     消费点目前也在 `plan()` 函数内），两边就会成环。这些谓词是纯函数、调用
     开销可忽略，保持局部 import 最省心。
     """
-    from ai.core.planner import (_placed_plates, _plate_pressure,
-                                 _plate_total, _time_pressure, _usable_plate)
+    from ai.core.planner import (_loose_pot_wanted, _placed_plates,
+                                 _plate_pressure, _plate_total, _time_pressure,
+                                 _usable_plate)
     return layer_of(task, world, rules=build_rules(
         _time_pressure, lambda w: _plate_pressure(w), _placed_plates,
-        _usable_plate, _plate_total))
+        _usable_plate, _plate_total, _loose_pot_wanted))
 
 
 def layer_filter(candidates, world, layer_fn=None):

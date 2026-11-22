@@ -72,19 +72,26 @@ def _breaks_combo_orders():
             {"id": "4", "dish": "Sushi_Fish", "remaining": 60.0, "lifetime": 130}]
 
 
-def test_breaks_combo_vetoes_non_head_delivery_when_head_alive():
+def test_breaks_combo_vetoes_non_head_delivery_when_head_close():
+    """队首已有料齐盘（马上能送）→ 拦非队首送餐。"""
     from ai import tasks as T
     w = _BreaksComboWorld(_breaks_combo_orders())
-    # 送 #4（鱼，非队首菜）→ 打断 combo，队首存在 → 否决
-    assert planner._breaks_combo(T.DeliverPlate("4", ("p1",)), w) is True
+    w.recipes, w.stations, w.cookers, w.items = [], [], [], []
+    w.plates = [{"n": "p0", "contents": ["Cucumber"], "detail": []}]
+    orig = planner._head_close
+    try:
+        planner._head_close = lambda world: True
+        assert planner._breaks_combo(T.DeliverPlate("4", ("p1",)), w) is True
+    finally:
+        planner._head_close = orig
 
 
-def test_breaks_combo_vetoes_non_head_even_when_head_hopeless():
+def test_breaks_combo_releases_when_head_not_close():
+    """队首没有快好的盘 → 放行（扣盘会占住盘位、拖垮出餐，2-2 实机）。"""
     from ai import tasks as T
     w = _BreaksComboWorld(_breaks_combo_orders())
-    # 严格保顺序：不做 solo_slack 跳单 escape（多人协作下 solo_slack 不准），
-    # 队首看似没救也仍拦非队首送餐。
-    assert planner._breaks_combo(T.DeliverPlate("4", ("p1",)), w) is True
+    w.recipes, w.stations, w.cookers, w.items, w.plates = [], [], [], [], []
+    assert planner._breaks_combo(T.DeliverPlate("4", ("p1",)), w) is False
 
 
 def test_breaks_combo_allows_head_dish_and_non_deliver():

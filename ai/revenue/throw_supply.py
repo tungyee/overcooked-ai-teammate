@@ -507,6 +507,12 @@ def dest_candidates(world, book, consumer, product):
     out = []
     want = (book.cookware_of(product) or "").lower()
     for c in world.cookers:
+        # 灶上没锅：生料投过去下不了锅。锅被端走后插件 cookware/cook_type
+        # 都是 None，下面「炊具未知不过滤」会把空煎灶当成意面的消费站
+        # （2-2 trace-20261119-005513：ThrowBatch(Pasta, cooker_01 (5)) 反复
+        # 被选，投料 33 秒、地上散落意面累计 108 料·秒）。
+        if not P.cooker_has_pot(c):
+            continue
         ck = P.cooker_cookware(c)
         if want and ck and not P.cookware_matches(ck, want):
             continue

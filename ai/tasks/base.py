@@ -429,6 +429,20 @@ def ingredient_source(ctx, raw, contents=()):
     return st
 
 
+def is_active_commitment(ctx, task):
+    # type: (Dict, Any) -> bool
+    """当前承诺就是这个 task（已经在执行，不是刚被考虑）。
+
+    「手里已经拿着要的容器」只说明东西在手，不说明这个 task 已经开工：盘/
+    卷饼可能是上一个 task 留在手里的。用它跳过启动时机判据时要连同承诺一起看
+    （trace-20261123-004522 4-6：盛完饭端着盘，「盛鸡肉」就以执行中身份
+    直接可行，离熟还有 10.7s 就去锅边站了 9s）。
+    """
+    bb = ctx.get("bb")
+    active = getattr(getattr(bb, "commitment", None), "active_task", None)
+    return getattr(active, "key", None) == getattr(task, "key", object())
+
+
 def held_matches_contents(ctx, item, contents=()):
     # type: (Dict, Optional[str], Any) -> bool
     """P2 手里是不是「名字 = item、内容 = contents」的那件。

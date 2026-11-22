@@ -202,8 +202,9 @@ def _raw_production(book, raw):
     return None
 
 
-def _compile_node(book, name):
-    # type: (RecipeBook, str) -> Optional[Dict]
+def _compile_node(book, name, wrap_have=None):
+    # type: (RecipeBook, str, Optional[Any]) -> Optional[Dict]
+    """wrap_have：该单配到的卷饼已装的馅 token（只用于顶层卷饼菜的装馅顺序）。"""
     kind = book.node_kind(name)
     if kind in (None, "leaf"):
         return _leaf_node(book, name)
@@ -233,7 +234,7 @@ def _compile_node(book, name):
         # 谁分高由 planner 选。wrap 节点排在**最前**：与 TakeCookedToPlate 同为
         # 「盛熟料救锅」、同分时（L1/L2 只比 pressure），stable sort 按候选顺序
         # 定胜负，排在前面让装馅压过装盘（trace-20261108-195728）。
-        wrap = _wrap_node(book, name)
+        wrap = _wrap_node(book, name, wrap_have)
         if wrap is not None:
             children.insert(0, wrap)
         return {"type": "DeliverPlate", "item": name, "children": children}
@@ -256,8 +257,8 @@ def _cook_node(book, name):
     return {"type": "FetchToCooker", "item": name, "children": children}
 
 
-def _wrap_node(book, name):
-    # type: (RecipeBook, str) -> Optional[Dict]
+def _wrap_node(book, name, have=None):
+    # type: (RecipeBook, str, Optional[Any]) -> Optional[Dict]
     """wrap 类载体菜（卷饼/汉堡）：卷饼直接装熟料、不进炉，装齐后端进盘。
 
         DeliverPlate
@@ -269,7 +270,16 @@ def _wrap_node(book, name):
     base = book.wrap_base(name)
     if base is None:
         return None
-    fillings = book.wrap_fillings(name)
+    fillings = list(book.wrap_fillings(name))
+    # 装馅顺序不固定：游戏允许任意顺序往卷饼里加熟料（实机先肉后饭
+    # (BurritoMeat)→(BurritoMeat,Rice)）。have = 该单配到的卷饼已装的 token：
+    # 已装的馅排到链底（视为完成），没装的接在后面，pre_contents 才能对上
+    # 现有卷饼。否则包肉卷饼永远等不到「往里盛饭」的候选（trace-20261123-
+    # 004522 t=7807：包肉卷饼在台面，AI 去给空卷饼盛饭）。
+    have = set(have or ())
+    if have:
+        order_idx = {f: i for i, f in enumerate(fillings)}
+        fillings.sort(key=lambda f: (book.rich_token(f) not in have, order_idx[f]))
     tokens = []  # type: List[str]
     for f in fillings:
         t = book.rich_token(f)
@@ -917,8 +927,10 @@ def emit(world, bb, book, order, plate_match, cooker_match, carrier_match=None):
         out.extend(_emit_plate(world, bb, order_id))
 
     root = None
+    carrier = carrier_match.get(order_id)
     if book.recipe(dish) is not None:
-        root = _compile_node(book, dish)
+        root = _compile_node(book, dish,
+                             wrap_have=carrier["contents"] if carrier else None)
         # 整道菜是熟料节点（披萨）：编出来的根是「端盘取熟」，出餐还得包一层
         if root is not None and root["type"] != "DeliverPlate":
             root = {"type": "DeliverPlate", "item": dish, "children": [root]}
@@ -934,7 +946,7 @@ def emit(world, bb, book, order, plate_match, cooker_match, carrier_match=None):
             "order_id": order_id, "plate_id": plate_id,
             "cooker_match": cooker_match, "used_cookers": {},
             "plate_match": plate_match,
-            "carrier": carrier_match.get(order_id),
+            "carrier": carrier,
             "prep_carrier": CR.match_prep_carriers(
                 world, book, skip=set((cooker_match or {}).values())).get(order_id),
         }

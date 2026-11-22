@@ -663,6 +663,9 @@ def _breaks_combo(task, world):
          队首过期本身就会断 combo，再拦着备好的菜只会让它跟着一起过期
          （trace-20261029-130632：MeatOnly 盘料齐后被拦 65 秒，直到队首
          Marinara 过期才送出）。
+      3. 队首不「马上能送」（_head_close 为假）：只有队首已有料齐盘、或只差
+         几秒内会熟的熟料时才拦。其余情况放行，L3 里 combo_head/combo_break
+         的软分仍让队首菜在同时可送时优先。
 
     不用 solo_slack 判「队首没救」：多人协作下它是 P2 单人手口径、不准，会误放行。
     """
@@ -677,7 +680,13 @@ def _breaks_combo(task, world):
     credited = _credited_order_id(world.orders, dish)
     if credited is None or credited == head:
         return False
-    return not _head_order_doomed(world)
+    if _head_order_doomed(world):
+        return False
+    # 软化（2-2 trace-20261119-005513/004632）：硬拦只在「队首马上就能送」时
+    # 才值得。队首还差得远时，扣着料齐盘不送会占住盘位（本关只有 3 只盘）：
+    # 熟锅没盘装只能端下灶、灶位跟着丢，最后队首照样过期、combo 照断。
+    # 实测成品盘被扣 67~125 秒，而 combo 小费每单只有 3~8 分。
+    return _head_close(world)
 
 
 def _head_credit_blocked(world):
@@ -711,6 +720,65 @@ def _head_order_doomed(world):
     if rem is None or float(rem) > COMBO_SKIP_HEAD_REMAINING:
         return False
     return not _head_plate_ready(world, head)
+
+
+# 队首差的熟料若这么多秒内能熟（或已熟），才算「马上能送」、值得扣着别的盘。
+COMBO_WAIT_HEAD_S = 6.0
+
+
+def _head_close(world):
+    # type: (World) -> bool
+    """队首单是否「马上就能送」：已有料齐盘，或有一只盘只差熟料、且每样
+    差的熟料都已熟 / COMBO_WAIT_HEAD_S 秒内会熟。
+
+    只认内容是队首子集的盘（错料盘不算）。缺需切/非熟料、或缺的熟料还没
+    下锅 → 不算近，combo 闸放行。
+    """
+    from ai.query.recipes import RecipeBook
+    head_id = _combo_head_id(world.orders)
+    head = next((o for o in world.orders if o.get("id") == head_id), None)
+    if head is None:
+        return False
+    recipes = getattr(world, "recipes", None) or []
+    book = RecipeBook(recipes, getattr(world, "stations", None) or [])
+    plates = list(getattr(world, "plates", None) or ()) + \
+        list(getattr(world, "held_plates", None) or ())
+    if not plates:
+        return False
+    allowed = book.order_want_tokens(head)
+    ready = _ready_soon_tokens(world, book)
+    for p in plates:
+        if not book.plate_tokens(p) <= allowed:
+            continue
+        missing = book.missing(head, p)
+        if not missing:
+            return True
+        if all(book.needs_cooking(ing) and book.rich_token(ing) in ready
+               for ing in missing):
+            return True
+    return False
+
+
+def _ready_soon_tokens(world, book):
+    # type: (World, Any) -> Set[str]
+    """已熟（灶上 / 散熟锅）或 COMBO_WAIT_HEAD_S 秒内会熟的熟料 rich token。"""
+    toks = set()  # type: Set[str]
+    try:
+        for src in cooked_sources(world, book):
+            toks |= set(src.get("tokens") or ())
+    except (AttributeError, TypeError):
+        return toks
+    from ai.tasks.base import _cooker_cooked_tokens
+    for c in getattr(world, "cookers", None) or ():
+        if not c.get("isCooking") or P.cooker_burning(c):
+            continue
+        try:
+            left = float(c.get("cooking_time") or 0) - float(c.get("cooking_progress") or 0)
+        except (TypeError, ValueError):
+            continue
+        if left <= COMBO_WAIT_HEAD_S:
+            toks |= _cooker_cooked_tokens(c, book)
+    return toks
 
 
 def _head_plate_ready(world, head_order):
@@ -1435,7 +1503,19 @@ def _match_cookers_to_orders(world, bb, book, plate_match, orders=None,
         for token in s["tokens"]:
             for oid, o in needy.get(token, []):
                 has_plate = _order_plate_id(plate_match, oid) is not None
-                prio = 0 if (s["ready"] and has_plate) else 1
+                # 该单配到的卷饼已装了别的馅、只差这一份：熟源 + 半成品卷饼同样
+                # 是「能立即接住」，与有盘同级。否则熟饭配给只有空卷饼的单，
+                # 包肉卷饼等不到饭（trace-20261123-004522 t=7255 / 7807，4-6）。
+                car = carrier_match.get(oid)
+                has_wrap = bool(car and car["contents"])
+                # 锅还在煮时也先配给半成品卷饼（只差这一份就齐），别让端着空
+                # 卷饼去锅边等、熟了再换卷饼。普通单之间仍按原序（2 档内比）。
+                if s["ready"] and (has_plate or has_wrap):
+                    prio = 0
+                elif has_wrap:
+                    prio = 1
+                else:
+                    prio = 2
                 # 越接近烧糊的源越要先配给有盘的单：锅在灶上（danger 高）比
                 # 散锅（danger 0）更紧急，否则散锅抢走有盘的单、灶上锅配给
                 # 没盘的单，TakeCookedToPlate 发不出来，活活烧糊（实机复现）。
@@ -2537,6 +2617,13 @@ def _score_candidate(world, bb, candidate, book=None, plate_match=None,
             if book is not None else 0
         terms["cooker_idle"] = _cooker_idle_bonus(shortfall) * _fill_plate_factor(
             shortfall, world, book, plate_match, task.item)
+    elif task.TYPE == "RecoverLoosePot":
+        # 空锅回灶是填灶的前一步：灶上没锅时 FillCooker 发不出来（2-2 实机：
+        # 煎锅被端下灶后空锅在台面放 64~140 秒、一次都没回灶）。按这口锅能
+        # 煮的熟料缺口给同口径的填灶分，与 FillCooker 在 L6 公平竞争。
+        shortfall, item = _loose_pot_shortfall(task, world, book)
+        terms["cooker_idle"] = (_cooker_idle_bonus(shortfall) * _fill_plate_factor(
+            shortfall, world, book, plate_match, item)) if item else 0.0
     else:
         terms["cooker_idle"] = 0.0
 
@@ -2752,6 +2839,36 @@ def _cooker_idle_bonus(shortfall):
         return 0.0
     ratio = min(1.0, float(shortfall) / COOKER_SHORTFALL_SATURATION)
     return W_COOKER_IDLE * ratio
+
+
+def _loose_pot_shortfall(task, world, book):
+    # type: (Any, World, Any) -> Tuple[int, Optional[str]]
+    """RecoverLoosePot 的散锅能煮的熟料里最大的缺口 → (缺口, 熟料)。
+
+    炊具按锅名匹配（煎锅只算煎料、炖锅只算煮面）。没有配方书 / 没缺口时
+    返回 (0, None)：L6 里不加分，回灶仍可在空闲时以 0 分被选上。
+    """
+    if book is None:
+        return 0, None
+    pot = str(getattr(task, "item", "") or "")
+    best, best_item = 0, None
+    for item in CS.cooked_items_wanted(world, book):
+        if not P.cookware_matches(pot, book.cookware_of(item)):
+            continue
+        n = CS.cooked_shortfall(world, book, item)
+        if n > best:
+            best, best_item = n, item
+    return best, best_item
+
+
+def _loose_pot_wanted(task, world):
+    # type: (Any, World) -> bool
+    """层判定用：RecoverLoosePot 回灶后能煮的熟料是否还缺份（进 L6 的条件）。"""
+    recipes = getattr(world, "recipes", None)
+    if not recipes:
+        return False
+    book = RecipeBook(recipes, getattr(world, "stations", None) or [])
+    return _loose_pot_shortfall(task, world, book)[0] > 0
 
 
 def _fill_plate_factor(shortfall, world, book, plate_match, item):
