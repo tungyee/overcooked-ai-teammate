@@ -17,6 +17,7 @@ from ai.tasks.base import (TASK_TIMEOUT_TICKS, Task, _register,
                            conveyor_pickup,
                            cooker_state, cooker_station, cooked_sources,
                            ingredient_available, ingredient_source,
+                           is_active_commitment,
                            loose_count, loose_on_station, plate_by_id,
                            plate_matches_order, _station_for_item)
 
@@ -510,8 +511,10 @@ class TakeCookedToPlate(Task):
             return False                       # 盘里已有这份熟料（done 边界）
         if not plate_matches_order(ctx, p, self.order_id):
             return False                       # 盘内容与该单不再兼容（P1 放错料）
-        if _holding_plate(ctx, self.plate_id):
+        if _holding_plate(ctx, self.plate_id) and is_active_commitment(ctx, self):
             return True                        # 执行中：目标盘已在手上
+        # 手里端着盘但本 task 还没开工（盘是上一步留在手里的）：照样过启动时机，
+        # 否则「盛完饭端着盘」会直接去等离熟还早的锅（is_active_commitment）。
         s = self._source(ctx)
         if s is None:
             return False

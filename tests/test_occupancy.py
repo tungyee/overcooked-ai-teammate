@@ -874,3 +874,26 @@ def test_station_block_cells_plate_station_fallback_to_gx_gz():
 
 def test_station_block_cells_non_dict_returns_empty():
     assert O.station_block_cells(None, {}, None) == set()
+
+
+def test_wind_between_detects_crossing_active_wind():
+    wz = [{"minx": 10.0, "maxx": 20.0, "minz": -9.0, "maxz": -6.0,
+           "vx": -6.5, "vz": 0}]
+    # 横穿风区（x 从 25 到 5，z 落在风区里）
+    assert O.wind_between(wz, (25.0, -7.5), (5.0, -7.5)) is True
+    # 不穿风（都在风区同侧）
+    assert O.wind_between(wz, (25.0, -7.5), (22.0, -7.5)) is False
+    # 风没起（vx/vz 为 0）不算
+    wz_off = [{"minx": 10.0, "maxx": 20.0, "minz": -9.0, "maxz": -6.0,
+               "vx": 0, "vz": 0}]
+    assert O.wind_between(wz_off, (25.0, -7.5), (5.0, -7.5)) is False
+    # 空/None 不炸
+    assert O.wind_between(None, (1.0, 1.0), (2.0, 2.0)) is False
+    assert O.wind_between(wz, None, (2.0, 2.0)) is False
+
+
+def test_wind_between_z_axis_crossing():
+    # 线段沿 z 走、穿过 z 范围，x 落在风区内
+    wz = [{"minx": 10.0, "maxx": 20.0, "minz": -9.0, "maxz": -6.0,
+           "vx": 6.5, "vz": 0}]
+    assert O.wind_between(wz, (15.0, -10.0), (15.0, -3.0)) is True

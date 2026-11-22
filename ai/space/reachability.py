@@ -186,7 +186,8 @@ def _interact_goals(ctx, entry):
         # 否则墙外死区比厨房侧更深时规划层会认为能送、执行层永远走不到。
         goals = set(navigation.serving_hatch_interact_cells(
             fp, world.walkable, world.belt_cells,
-            field=ctx.get('field'), include_belts=True))
+            field=ctx.get('field'), include_belts=True,
+            back=navigation.hatch_back(entry)))
         # 漂移出餐口量化到「紧邻是水面」的那一行时，格内交互位为空；
         # 补格外站位（与 move.Approach 同一判据，见 shuttle.hatch_fallback）。
         extra = {s['cell'] for s in shuttle.hatch_fallback(world, entry)}

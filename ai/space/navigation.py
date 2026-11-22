@@ -297,10 +297,53 @@ def _pick_hatch_side(primary_cells, secondary_cells, primary_depth,
     return None
 
 
+def hatch_back(station):
+    # type: (Optional[Dict]) -> Optional[Tuple[float, float]]
+    """插件报的出餐口背面方向 (back_x, back_z)；旧帧没有 → None。"""
+    if not isinstance(station, dict):
+        return None
+    bx, bz = station.get("back_x"), station.get("back_z")
+    if bx is None or bz is None:
+        return None
+    try:
+        return float(bx), float(bz)
+    except (TypeError, ValueError):
+        return None
+
+
+def hatch_front_cells(footprint, back, is_walkable):
+    # type: (Iterable[Tuple[int, int]], Tuple[float, float], Callable[[int, int], bool]) -> Optional[List[Tuple[int, int]]]
+    """按插件报的出餐口背面方向取正面那一排交互位。
+
+    `back` 是世界 XZ 方向（插件 plate_station.back_x/back_z，取自 prefab 的
+    Block_Back 背板，游戏内箭头指向其反面）。网格 gx/gz 与世界 x/z 同向，
+    所以正面 = 背面反方向的主轴。只返回当前可走的格：落火 / 临时占用只剔除
+    站位，不改变哪面是正面（Mine_4_6 实机：正面一格落火后，深度判据把背面
+    当成正面，两趟送餐都卡在出餐口侧面）。方向不明确（两轴等长）→ None。
+    """
+    bx, bz = back
+    if abs(abs(bx) - abs(bz)) < 1e-3:
+        return None
+    cells = list(footprint)
+    if abs(bx) > abs(bz):
+        dx, dz = (-1 if bx > 0 else 1), 0
+        edge = min(c[0] for c in cells) if dx < 0 else max(c[0] for c in cells)
+        row = [(edge + dx, c[1]) for c in cells if c[0] == edge]
+    else:
+        dx, dz = 0, (-1 if bz > 0 else 1)
+        edge = min(c[1] for c in cells) if dz < 0 else max(c[1] for c in cells)
+        row = [(c[0], edge + dz) for c in cells if c[1] == edge]
+    return sorted({c for c in row if is_walkable(c[0], c[1])})
+
+
 def serving_hatch_interact_cells(footprint, is_walkable, belt_cells=None,
-                                 field=None, include_belts=False):
-    # type: (Iterable[Tuple[int, int]], Callable[[int, int], bool], Optional[Set], Optional[Dict], bool) -> List[Tuple[int, int]]
+                                 field=None, include_belts=False, back=None):
+    # type: (Iterable[Tuple[int, int]], Callable[[int, int], bool], Optional[Set], Optional[Dict], bool, Optional[Tuple[float, float]]) -> List[Tuple[int, int]]
     """出餐口（嵌墙）交互位：只取厨房内侧（前侧），排除墙后死路一侧。
+
+    `back`（插件 0.25+ 的背面方向）存在时直接按它取正面，不再猜；正面此刻
+    全被挡住时返回空（Approach 会等/重选，而不是绕去背面或侧面）。下面的
+    深度判据只给旧帧用。
 
     出餐口是嵌在外墙里的一段墙，只有朝厨房的一面能送餐；墙后那一面是
     贴墙的死路（0~1 格），站过去既送不了餐、也常被柜台/墙卡住。前/后按
@@ -314,14 +357,20 @@ def serving_hatch_interact_cells(footprint, is_walkable, belt_cells=None,
     水平墙（占地 gz 相同、gx >= 2）比南北，垂直墙（占地 gx 相同、gz >= 2）
     比东西；1×1 或方向不明确的占地退化为 interact_cells_multi。
     """
+    footprint = list(footprint)
+    if back is not None and footprint:
+        front = hatch_front_cells(footprint, back, is_walkable)
+        if front is not None:
+            return front
     xs = sorted({c[0] for c in footprint})
     zs = sorted({c[1] for c in footprint})
 
+    # 旧帧兜底：每列都量、取最大深度（只量中间一列时，那一列正前方一格落火
+    # 就会把厨房侧深度算成 0）。
     if len(zs) == 1 and len(xs) >= 2:
         gz = zs[0]
-        mid_gx = xs[len(xs) // 2]
-        north = _walkable_depth(mid_gx, gz, 0, 1, is_walkable)
-        south = _walkable_depth(mid_gx, gz, 0, -1, is_walkable)
+        north = max(_walkable_depth(gx, gz, 0, 1, is_walkable) for gx in xs)
+        south = max(_walkable_depth(gx, gz, 0, -1, is_walkable) for gx in xs)
         north_cells = [(gx, gz + 1) for gx in xs if is_walkable(gx, gz + 1)]
         south_cells = [(gx, gz - 1) for gx in xs if is_walkable(gx, gz - 1)]
         side = _pick_hatch_side(north_cells, south_cells, north, south, field)
@@ -329,9 +378,8 @@ def serving_hatch_interact_cells(footprint, is_walkable, belt_cells=None,
             return side
     elif len(xs) == 1 and len(zs) >= 2:
         gx = xs[0]
-        mid_gz = zs[len(zs) // 2]
-        east = _walkable_depth(gx, mid_gz, 1, 0, is_walkable)
-        west = _walkable_depth(gx, mid_gz, -1, 0, is_walkable)
+        east = max(_walkable_depth(gx, gz, 1, 0, is_walkable) for gz in zs)
+        west = max(_walkable_depth(gx, gz, -1, 0, is_walkable) for gz in zs)
         east_cells = [(gx + 1, gz) for gz in zs if is_walkable(gx + 1, gz)]
         west_cells = [(gx - 1, gz) for gz in zs if is_walkable(gx - 1, gz)]
         side = _pick_hatch_side(east_cells, west_cells, east, west, field)

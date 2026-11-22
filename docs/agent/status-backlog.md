@@ -1,5 +1,13 @@
 # 已知限制、当前状态与待办
 
+## 出餐口正面读 prefab 背板（2026-11-23，插件 0.25.0，未实机验证）
+
+反编译：`PlateStation` / `ServerPlateStation` / `ClientPlateStation` 没有朝向字段，交互只看厨师朝向（`InteractWithItemHelper.GetCollidersInArc(1f, π)`），出餐口任一面够得着都能送；游戏内箭头是 prefab 美术，背板子物体 `Block_Back` 挡住后侧。旧判据按「两侧可走深度」猜正面且只量中间一列：`trace-20261122-234409`（Mine_4_6）lt 46~61 正面 (5,4) 落火后深度算成 0，两趟送餐都选了背面 (4,6)/(5,6)，绕到出餐口左右侧卡死。
+
+- 插件 `plate_station` 新增 `back_x/back_z/back_src`：取 `Block_Back` 相对站点中心的偏移，没有则 `-transform.forward`；每关每个出餐口打一行 `[HATCH]`（含子物体相对位置），用来与游戏内箭头核对。
+- `navigation.serving_hatch_interact_cells(back=...)`：有 back 时只取正面一排，落火/占用只剔除站位，正面全被挡返回空、不绕背面；旧帧退回深度判据，改为每列取最大深度。
+- 待实机：核对各关 `[HATCH]` 的 back 与箭头相反；`back_src=forward` 的关卡需确认 prefab forward 是否真指向正面。
+
 ## 只备料不组装：一条永远完成不了的命令（2026-11-09，已修）
 
 - **现象**（trace-20261109-124818）：240 秒里 FetchToBoard 90 秒 + Chop 41 秒，两个灶有 225 秒是空的；`FetchToCarrier`（组装）只在少数间隙被选中。

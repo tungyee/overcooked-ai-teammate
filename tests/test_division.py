@@ -3,6 +3,12 @@
 from types import SimpleNamespace
 
 from ai.dialog import division as D
+from ai.dialog.schema import preference_matches_task
+
+
+def _task(task_type, item):
+    # type: (str, str) -> SimpleNamespace
+    return SimpleNamespace(TYPE=task_type, item=item)
 
 
 def test_you_gets_no_bonus():
@@ -25,11 +31,146 @@ def test_set_item_level_and_claim():
     assert pref.scope == frozenset({("Chop", "meat")})
 
 
+def test_preferences_with_carry_map_expands_fetch():
+    """「切 → player」要连取料上砧板（FetchToBoard）一起扣分。"""
+    state = D.DivisionState()
+    state.set("切", D.OWNER_PLAYER, "Meat")
+    carry_map = {"Chop": frozenset({"FetchToBoard"})}
+    pref = state.preferences(carry_map)[0]
+    assert pref.scope == frozenset({("Chop", "meat"), ("FetchToBoard", "meat")})
+
+
+def test_preferences_without_carry_map_is_goal_only():
+    """不传 carry_map（派生失败 / 旧调用）时退回只扣目标步，不破坏行为。"""
+    state = D.DivisionState()
+    state.set("切", D.OWNER_PLAYER, "Meat")
+    pref = state.preferences()[0]
+    assert pref.scope == frozenset({("Chop", "meat")})
+
+
+def test_generic_does_not_override_specific_owner():
+    """specific 覆盖 generic：泛化「切→player」不该误扣具体归 AI 的土豆，
+    也不该和具体归 player 的鸡块重复扣。"""
+    state = D.DivisionState()
+    state.set("切", D.OWNER_PLAYER)                    # 泛化
+    state.set("切", D.OWNER_YOU, "Potato")             # 土豆归 AI
+    state.set("切", D.OWNER_PLAYER, "NuggetChicken")   # 鸡块归玩家（具体）
+    prefs = state.preferences()
+
+    # 土豆是 AI 的活：不命中任何负偏好
+    assert not any(preference_matches_task(p, _task("Chop", "Potato"))
+                   for p in prefs)
+    # 鸡块命中恰好一条，只 -6.0（不叠成 -12）
+    chicken = [p for p in prefs
+               if preference_matches_task(p, _task("Chop", "NuggetChicken"))]
+    assert len(chicken) == 1
+    assert chicken[0].weight == D.WEIGHT_CLAIM
+    # 其它料（生菜）由泛化兜底
+    lettuce = [p for p in prefs
+               if preference_matches_task(p, _task("Chop", "Lettuce"))]
+    assert len(lettuce) == 1
+    assert lettuce[0].weight == D.WEIGHT_CLAIM
+
+
+def test_generic_exclude_also_covers_carry():
+    """泛化「切→player」的 exclude 要连取料上砧板一起扣掉（carry 同 item 口径）。"""
+    state = D.DivisionState()
+    state.set("切", D.OWNER_PLAYER)
+    state.set("切", D.OWNER_YOU, "Potato")
+    carry_map = {"Chop": frozenset({"FetchToBoard"})}
+    prefs = state.preferences(carry_map)
+
+    # 土豆的取料也归 AI，不命中
+    assert not any(preference_matches_task(p, _task("FetchToBoard", "Potato"))
+                   for p in prefs)
+    # 其它料的取料仍被泛化扣分
+    assert any(preference_matches_task(p, _task("FetchToBoard", "NuggetChicken"))
+               for p in prefs)
+
+
 def test_both_has_no_preference():
     state = D.DivisionState()
     state.set("装盘", D.OWNER_BOTH)
     assert state.preferences() == []
     assert state.snapshot()["both"] == ["plate"]
+
+
+def _chicken_scope_ctx():
+    steps = frozenset({
+        ("FetchToBoard", "nuggetchicken"),
+        ("Chop", "nuggetchicken"),
+        ("FetchToCooker", "friedchickennuggets"),
+        ("TakeCookedToPlate", "friedchickennuggets"),
+    })
+    items = frozenset({"nuggetchicken", "friedchickennuggets"})
+    return {"friedchickennuggets": steps}, {"friedchickennuggets": items}
+
+
+def test_prepare_preference_covers_full_chain():
+    """prepare（备料）→ player 的 claim scope = 该物料整链全部 steps。"""
+    state = D.DivisionState()
+    state.set("备料", D.OWNER_PLAYER, "FriedChickenNuggets")
+    material_steps, material_items = _chicken_scope_ctx()
+    prefs = state.preferences(None, material_steps, material_items)
+    assert len(prefs) == 1
+    assert prefs[0].scope == material_steps["friedchickennuggets"]
+    assert prefs[0].exclude == frozenset()
+    # 整链里的每一步都被扣
+    assert preference_matches_task(prefs[0], _task("Chop", "NuggetChicken"))
+    assert preference_matches_task(
+        prefs[0], _task("TakeCookedToPlate", "FriedChickenNuggets"))
+
+
+def test_prepare_overrides_fine_grained_actions():
+    """prepare X 覆盖 chop/cook/mix 对 X 的归属：切→player 不该再扣鸡块。"""
+    state = D.DivisionState()
+    state.set("备料", D.OWNER_YOU, "FriedChickenNuggets")   # AI 备整条鸡块
+    state.set("切", D.OWNER_PLAYER)                          # 玩家切所有
+    material_steps, material_items = _chicken_scope_ctx()
+    prefs = state.preferences(None, material_steps, material_items)
+
+    # 鸡块整链（含取料/切）都不被「切→player」扣
+    assert not any(preference_matches_task(p, _task("Chop", "NuggetChicken"))
+                   for p in prefs)
+    assert not any(preference_matches_task(p, _task("FetchToBoard", "NuggetChicken"))
+                   for p in prefs)
+    # 其它料的切仍由「切→player」兜底
+    assert any(preference_matches_task(p, _task("Chop", "Lettuce")) for p in prefs)
+
+
+def test_prepare_skips_shadowed_item_entry():
+    """prepare X 接管后，chop:X 这类物料级细粒度条目直接跳过，不产生死偏好。"""
+    state = D.DivisionState()
+    state.set("备料", D.OWNER_YOU, "FriedChickenNuggets")   # AI 备鸡块整链
+    state.set("切", D.OWNER_PLAYER)                          # 玩家切所有（泛化）
+    state.set("切", D.OWNER_PLAYER, "NuggetChicken")         # 被 prepare 覆盖
+    material_steps, material_items = _chicken_scope_ctx()
+    prefs = state.preferences(None, material_steps, material_items)
+
+    # 只有泛化「切→player」一条；chop:NuggetChicken 被 prepare 覆盖直接跳过。
+    assert len(prefs) == 1
+    # 鸡块链仍被 exclude，不误扣；其它料仍由泛化兜底。
+    assert not preference_matches_task(prefs[0], _task("Chop", "NuggetChicken"))
+    assert preference_matches_task(prefs[0], _task("Chop", "Lettuce"))
+
+
+def test_validate_entry_prepare_requires_item_and_real_material():
+    world = SimpleNamespace(stations=[{"t": "chopping"}])
+    kitchen = SimpleNamespace(materials={
+        "FriedChickenNuggets": SimpleNamespace(
+            items={"NuggetChicken", "FriedChickenNuggets"})})
+
+    ok, reason, _ = D.validate_entry(world, None, kitchen, None,
+                                     "prepare", "you")
+    assert not ok and "item" in reason
+
+    ok, reason, _ = D.validate_entry(world, None, kitchen, None,
+                                     "prepare", "you", "Chips")
+    assert not ok and "没有物料" in reason
+
+    ok, reason, _ = D.validate_entry(world, None, kitchen, None,
+                                     "prepare", "you", "NuggetChicken")
+    assert ok, reason
 
 
 def test_overwrite_and_clear():
@@ -53,6 +194,18 @@ def test_clear_action_removes_item_entries():
     assert state.entries == []
 
 
+def test_overlapping_actions_detects_generic_plus_specific():
+    state = D.DivisionState()
+    assert state.overlapping_actions() == []
+    state.set("切", D.OWNER_PLAYER)
+    assert state.overlapping_actions() == []
+    state.set("切", D.OWNER_YOU, "Potato")
+    assert state.overlapping_actions() == ["chop"]
+    # 清掉泛化条目后不再并存
+    state.clear("切", None)
+    assert state.overlapping_actions() == []
+
+
 def test_diff_entries():
     old = D.DivisionState()
     old.set("下锅", D.OWNER_YOU)
@@ -71,7 +224,8 @@ def test_tool_actions_excludes_deliver_wash_and_missing_stations():
         {"t": "chopping"}, {"t": "cooking"}, {"t": "plate_station"},
         {"t": "washing"},
     ]
-    assert D.tool_actions(stations) == ["chop", "cook"]
+    # 没有 mixing 站 → mix 不进；prepare（物料级整链）不绑站点，恒常驻。
+    assert D.tool_actions(stations) == ["chop", "cook", "prepare"]
 
 
 def test_station_signature_changes_only_when_stations_move():

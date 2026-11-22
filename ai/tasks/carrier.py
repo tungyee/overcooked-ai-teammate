@@ -22,7 +22,7 @@ from ai.tasks.base import (TASK_TIMEOUT_TICKS, Task, _register,
                            cooker_state, cooker_station,
                            cooked_sources, held_matches_contents,
                            ingredient_available, ingredient_source,
-                           loose_on_station)
+                           is_active_commitment, loose_on_station)
 from ai.tasks.cook import (_cooker_ready_to_take, TAKE_COOKED_TIMEOUT_TICKS,
                            WAIT_COOKED_TIMEOUT_TICKS)
 
@@ -336,9 +336,13 @@ class FillCarrier(Task):
         """
         if self.done(ctx):
             return False
-        if self._holding_wrapper(ctx):
+        holding = self._holding_wrapper(ctx)
+        if holding and is_active_commitment(ctx, self):
             return True
-        if not ingredient_available(ctx, self.base_form, self.pre_contents):
+        # 手里的卷饼是上一步留下的（刚盛完饭）：本 task 还没开工，照样过启动
+        # 时机，别端着卷饼去等离熟还早的锅（trace-20261123-004522 lt 186.7）。
+        if not holding and not ingredient_available(ctx, self.base_form,
+                                                    self.pre_contents):
             return False
         s = self._source(ctx)
         if s is None:

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ai import tasks as T
 from ai.core import arbiter, executor, planner
-from ai.dialog.action_defs import ACTION_STATION_TYPES
+from ai.dialog.action_defs import ACTION_STATION_TYPES, input_carry_map
 from ai.dialog.command_queue import (Command, CommandQueue, build_scope,
                                 command_done, command_done_undecidable,
                                 command_failed, deliveries,
@@ -669,7 +669,7 @@ class Agent:
                 results.append(self._read_cookbook(args))
             else:
                 results.append({"ok": False, "reason": "未知工具：%s" % (name,)})
-        self._sync_division_preferences()
+        self._sync_division_preferences(world)
         return results
 
     def _division_tool_actions(self, world):
@@ -690,25 +690,22 @@ class Agent:
         rejected = []  # type: List[Dict]
         applied = []  # type: List[Dict]
 
-        def _clear(action_tool):
-            action = TOOL_ACTION_NAMES.get(str(action_tool or "").strip())
-            if action not in DIVISION_ACTIONS:
-                rejected.append({"action": action_tool,
-                                 "reason": "本关不开放这个分工动作"})
-                return
-            self.bb.division.clear(action)
-
-        if args.get("clear_all") is True:
-            self.bb.division.clear_all()
-        clear = args.get("clear") or []
-        if isinstance(clear, str):
-            clear = [clear]
-        for action_tool in clear:
-            _clear(action_tool)
-
         assignments = args.get("assignments") or []
         if isinstance(assignments, dict):
             assignments = [assignments]
+
+        # 覆盖语义：assignments 里列出的动作 = 该动作的完整新分工，先清掉旧
+        # 条目再写入。模型直接输出完整分工即可覆盖旧的，没有 clear/clear_all
+        # 参数（清空由换关重置负责；「不归谁」用 owner=both 表达）。
+        replace_actions = set()  # type: set
+        for row in assignments:
+            if isinstance(row, dict):
+                action = TOOL_ACTION_NAMES.get(str(row.get("action") or "").strip())
+                if action in DIVISION_ACTIONS:
+                    replace_actions.add(action)
+        for action in replace_actions:
+            self.bb.division.clear(action)
+
         for row in assignments:
             if not isinstance(row, dict):
                 rejected.append({"reason": "assignments 里每项必须是对象"})
@@ -733,7 +730,7 @@ class Agent:
             applied.append(row_out)
 
         changed = diff_entries(before, self.bb.division)
-        self._sync_division_preferences()
+        self._sync_division_preferences(world)
         out = {
             "tool": "set_division",
             # 有任何一条被拒就按失败处理：worker 不会播乐观台词，会强制
@@ -748,6 +745,14 @@ class Agent:
         }
         if rejected:
             out["reason"] = "；".join(r.get("reason") or "" for r in rejected)
+        overlap = self.bb.division.overlapping_actions()
+        if overlap:
+            # 覆盖语义下，只有「同一次调用里同时写动作级 + 物料级」才会触发
+            # （例如 chop→player 且 chop:potato→you 一起发，表示「土豆除外」），
+            # 这是合法写法，不再建议 clear，只提醒物料级会覆盖动作级。
+            out["warning"] = (
+                "「%s」同时有动作级和物料级条目：物料级会覆盖动作级对相应物料"
+                "的归属。" % "、".join(overlap))
         return out
 
     def _read_cookbook(self, args):
@@ -1021,10 +1026,40 @@ class Agent:
             self.bb.hold_until = (self.bb.tick or 0) + 5 * 20
         return result
 
-    def _sync_division_preferences(self):
-        # type: () -> None
-        """分工表是唯一事实来源：重编 `bb.preferences`。"""
-        self.bb.preferences[:] = self.bb.division.preferences()
+    def _sync_division_preferences(self, world):
+        # type: (World) -> None
+        """分工表是唯一事实来源：重编 `bb.preferences`。
+
+        按当前关卡厨房 DAG 派生「加工步 → 搬运步」表（input_carry_map）与
+        「物料 → 整链」表（material_steps/material_items），让「切 → player」
+        把取料上砧板一起扣分、并支持物料级 prepare（备料）整链扣分与覆盖。
+        派生失败时退回无 carry——分工本身不因此中断。
+        """
+        carry_map = None
+        material_steps = None
+        material_items = None
+        try:
+            kitchen = self._kitchen(world)
+            dags = getattr(kitchen, "dags", None) or {}
+            carry_map = input_carry_map(list(dags.values()))
+            material_steps = {}
+            material_items = {}
+            for name, mat in (getattr(kitchen, "materials", None) or {}).items():
+                steps = frozenset((task_type, str(item).lower())
+                                  for task_type, item in getattr(mat, "steps", ()) or ()
+                                  if item)
+                items = frozenset(str(item).lower()
+                                  for item in getattr(mat, "items", ()) or ())
+                # 物料名 + 链上所有 item 都指向同一整链（模型可能写生料名/熟料名）。
+                for key in ({str(name).lower()} | items):
+                    material_steps[key] = steps
+                    material_items[key] = items
+        except Exception:                # noqa: BLE001
+            carry_map = None
+            material_steps = None
+            material_items = None
+        self.bb.preferences[:] = self.bb.division.preferences(
+            carry_map, material_steps, material_items)
 
     def _load_guide(self, level, level_number=None):
         # type: (Any, Any) -> None

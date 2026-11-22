@@ -187,6 +187,28 @@ def _send_scope(action):
     return {("SendAcross", kind) for kind in ACTION_SEND_KINDS.get(action, ())}
 
 
+def material_chain_scope(kitchen, name):
+    # type: (Any, str) -> Optional[frozenset]
+    """物料名 → 该物料完整链的 scope（(task_type, item) 全量，含装盘/载体）。
+
+    prepare（备料）的 scope：取物料 DAG 链的全部 steps，不含送餐/洗盘/摆盘。
+    命令侧（build_scope）与分工侧（preferences）共用；找不到物料返回 None。
+    """
+    materials = getattr(kitchen, "materials", {}) or {}
+    mat = materials.get(name)
+    if mat is None:
+        key = _norm(name)
+        for mat_name, value in materials.items():
+            if _norm(mat_name) == key:
+                mat = value
+                break
+    if mat is None:
+        return None
+    return frozenset((task_type, _norm(item))
+                     for task_type, item in getattr(mat, "steps", ()) or ()
+                     if item)
+
+
 def build_scope(kitchen, action, target, mode):
     # type: (Any, str, Optional[str], Optional[str]) -> Tuple[Optional[Scope], str]
     """动作 + target → task scope；做不到时返回 (None, reason)。
@@ -204,12 +226,18 @@ def build_scope(kitchen, action, target, mode):
     if action == "press_switch":
         return frozenset({("ReceiveConveyor", None)}), ""
 
+    if action == "prepare":
+        # 物料级整链：scope = 该物料全部 steps（含装盘/载体），不含送餐。
+        if mode != "material" or not target:
+            return None, "prepare 需要指定一种物料（本关目录里的英文名）"
+        scope = material_chain_scope(kitchen, target)
+        if not scope:
+            return None, "本关没有「%s」或它没有可做的步骤" % (target,)
+        return scope, ""
+
     chinese = TOOL_ACTION_NAMES.get(action)          # chop→切 / plate→装盘 / fetch→None
     if action == "fetch":
         goal_types = FETCH_COMMAND_TYPES
-        auto_upstream = False
-    elif action == "prepare":
-        goal_types = None                            # 整道菜：后续单独实现
         auto_upstream = False
     else:
         goal_types = DIVISION_TASK_TYPES.get(chinese)
@@ -259,10 +287,8 @@ def build_scope(kitchen, action, target, mode):
         names = (getattr(kitchen, "dish_materials", {}) or {}).get(target) or []
         for name in names:
             add_material(name)
-        if action in ("plate", "prepare"):
+        if action == "plate":
             scope.add(("PlaceCleanPlate", None))
-        if action == "prepare":
-            scope.add(("DeliverPlate", None))
     else:
         add_material(target)
 

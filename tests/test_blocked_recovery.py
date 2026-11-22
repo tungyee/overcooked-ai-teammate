@@ -34,8 +34,20 @@ def test_poll_exec_blocked_box_records_cells():
                      "blocked_kind": "obstacle", "blocked_cell": None})
     assert p._poll_exec(ctx, ex) == Status.FAILURE
     assert ctx["motion_failure"]["reason"] == "blocked"
-    assert ctx["motion_failure"]["blocked_cells"] == [(3, 0)]
+    # blocked 拉黑外扩一圈邻格：障碍物旁的贴身缝（格心离障碍物 0.39m、
+    # 点判可走但实体过不去）也要一起拉黑，否则重绕仍走老路
+    # （trace-20261119-002630）。
+    assert ctx["motion_failure"]["blocked_cells"] == sorted(
+        (gx, gz) for gx in (2, 3, 4) for gz in (-1, 0, 1))
     assert ctx["motion_failure"]["blocked_kind"] == "obstacle"
+
+
+def test_blocked_box_cells_expands_surrounding_cells():
+    from ai.space import occupancy as O
+    box = (3.1, 4.1, -0.5, 0.5)
+    w = FakeWorld()
+    got = O.blocked_box_cells(box, w.to_grid, w.to_world)
+    assert got == {(gx, gz) for gx in (2, 3, 4) for gz in (-1, 0, 1)}
 
 
 def test_blocked_motion_failure_writes_box_cells_and_does_not_abandon():

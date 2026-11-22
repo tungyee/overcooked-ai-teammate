@@ -139,7 +139,7 @@ def _station_interact_cells(st, cell, w, kind, include_belts=False, field=None):
         fp = O.station_block_cells(st, w.terrain, w.mapping)
         return navigation.serving_hatch_interact_cells(
             fp, w.walkable, w.belt_cells, field=field,
-            include_belts=include_belts)
+            include_belts=include_belts, back=navigation.hatch_back(st))
     if st.get("t") == "conveyor":
         from ai.space import channels as CH
         moving = CH.conveyor_interact_cells(w, st)

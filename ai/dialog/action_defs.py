@@ -14,7 +14,7 @@
 字符串字面量写死，由 `tests/test_actions.py::test_action_partition_covers_all_task_types`
 钉住「映射恰好覆盖全部 TASK_TYPES、无重叠、无遗漏」。
 """
-from typing import Dict, FrozenSet, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Optional, Tuple
 
 # 动作 → 「这一步」task TYPE（= 目标步）。分工 scope 和命令 scope 的目标步
 # 都从这里取；命令 scope 对加工动作（切/下锅/拌）再自动补上游前缀。
@@ -36,6 +36,12 @@ COMMAND_UPSTREAM = frozenset(("切", "下锅", "拌"))
 # 取料/搬运：planner 按料源可达性自动归位，不进 LLM 枚举。
 FETCH_TASK_TYPES = ("FetchToBoard", "FetchToCarrier", "FillCarrier",
                     "Prefetch")  # type: Tuple[str, ...]
+
+# 会「吃进搬运步」的加工目标步：这些步要把料搬到本站才算完成，分工 scope
+# 要把喂料它的搬运步一起算进去（切→取料上砧板、拌→取料到混合站）。复合搬运
+# 步（FetchToCooker / FetchToPlate）不在此列——它们本身就是「搬运 + 下锅/装盘」，
+# 上游（Chop 链）归别的分工动作，不能算作下锅/装盘的搬运。
+CARRY_BOUNDARY_TYPES = ("Chop", "Mix", "FillCooker")  # type: Tuple[str, ...]
 
 # auto_only / 跨边交接 / 救援：不开放认领。
 OTHER_TASK_TYPES = (
@@ -67,6 +73,7 @@ ACTION_TOOL_NAMES = {
     "切": "chop",
     "下锅": "cook",
     "拌": "mix",
+    "备料": "prepare",
     "装盘": "plate",
     "送餐": "deliver",
     "洗盘": "wash",
@@ -83,12 +90,13 @@ ACTION_LABELS = {
     "deliver": "送餐",
     "wash": "洗盘",
     "fetch": "取料",
-    "prepare": "整道菜",
+    "prepare": "备料",
     "press_switch": "按开关",
 }  # type: Dict[str, str]
 
-# 可分工动作：切/下锅/拌。送餐/洗盘/装盘谁近谁做，交给 planner 自由选。
-DIVISION_ACTIONS = ("切", "下锅", "拌")  # type: Tuple[str, ...]
+# 可分工动作：切/下锅/拌/备料。备料是「物料级整链」（取→切→下锅→装盘），
+# 必须带 item；送餐/洗盘/装盘谁近谁做，交给 planner 自由选。
+DIVISION_ACTIONS = ("切", "下锅", "拌", "备料")  # type: Tuple[str, ...]
 
 _TASK_TO_ACTION = {}  # type: Dict[str, str]
 for _action, _types in DIVISION_TASK_TYPES.items():
@@ -102,12 +110,57 @@ def task_action(task_type):
     return _TASK_TO_ACTION.get(str(task_type))
 
 
-def action_scope(action, item=None):
-    # type: (str, Optional[str]) -> FrozenSet[Tuple[Optional[str], Optional[str]]]
+def action_scope(action, item=None, carry=None):
+    # type: (str, Optional[str], Optional[Iterable[str]]) -> FrozenSet[Tuple[Optional[str], Optional[str]]]
     """动作 → 作用域。`item` 为 None 时是动作级 `{(type, None)}`，否则精确到
-    节点 `{(type, item.lower())}`。"""
+    节点 `{(type, item.lower())}`。`carry` 是要一起算进来的搬运步类型
+    （DAG 派生，见 `input_carry_map`），和动作本身的 item 同口径。"""
     types = DIVISION_TASK_TYPES[action]
+    if carry:
+        types = types + tuple(t for t in carry if t not in types)
     if item is None:
         return frozenset((t, None) for t in types)
     item_l = str(item).lower()
     return frozenset((t, item_l) for t in types)
+
+
+def input_carry_map(dag_nodes):
+    # type: (Optional[Iterable[Dict[str, Any]]]) -> Dict[str, FrozenSet[str]]
+    """从配方 DAG 派生「加工步 → 喂料它的搬运步」（分工 scope 用）。
+
+    与命令侧的 `build_scope` 同源（都读 DAG），但展开深度不同：命令取「到
+    目标步为止的完整前缀」，分工只取「喂进目标步的那一层搬运步」。搬运步
+    （FETCH_TASK_TYPES）归给离它最近的真·加工步（CARRY_BOUNDARY_TYPES）；
+    复合搬运步（FetchToCooker 等）不算边界，所以它子树里的 FetchToBoard
+    归给 Chop（切），不归给下锅。
+
+    `dag_nodes` 是 recipe_graph 编译出的 `{type, item, children}` 树根
+    （如 `Kitchen.dags.values()`）。返回 {加工步 type: frozenset(搬运步 type)}。
+    """
+    result = {}  # type: Dict[str, set]
+
+    def walk(node, feeding):
+        # type: (Dict[str, Any], Optional[str]) -> None
+        task_type = node.get("type")
+        if task_type in CARRY_BOUNDARY_TYPES:
+            feeding = task_type
+        elif task_type in FETCH_TASK_TYPES and feeding is not None:
+            result.setdefault(feeding, set()).add(task_type)
+            return  # 搬运步是叶子，不往下钻
+        for child in node.get("children") or ():
+            if isinstance(child, dict):
+                walk(child, feeding)
+
+    for root in dag_nodes or ():
+        if isinstance(root, dict):
+            walk(root, None)
+    return {k: frozenset(v) for k, v in result.items()}
+
+
+def carry_for(goal_types, carry_map):
+    # type: (Iterable[str], Optional[Dict[str, FrozenSet[str]]]) -> FrozenSet[str]
+    """某个动作的目标步 → 要补进分工 scope 的搬运步类型（并集）。"""
+    carry = set()  # type: set
+    for goal in goal_types:
+        carry |= set((carry_map or {}).get(goal, ()))
+    return frozenset(carry)

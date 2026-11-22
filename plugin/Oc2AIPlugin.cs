@@ -11,7 +11,7 @@ using UnityEngine;
 
 namespace Oc2AI
 {
-    [BepInPlugin("com.oc2.aiplaymate", "OC2 AI Playmate", "0.24.9")]
+    [BepInPlugin("com.oc2.aiplaymate", "OC2 AI Playmate", "0.25.0")]
     public partial class Oc2AIPlugin : BaseUnityPlugin
     {
         const int Port = 27411;
@@ -89,7 +89,7 @@ namespace Oc2AI
 
         void Awake()
         {
-            Logger.LogInfo("[OC2AI v0.24.9 exec] loaded");
+            Logger.LogInfo("[OC2AI v0.25.0 exec] loaded");
             _discoverEnabled = Config.Bind<bool>("Diagnostics", "DiscoverComponents", false, "Expensive discovery; disabled for normal play.");
             _trafficProbeEnabled = Config.Bind<bool>("Diagnostics", "TrafficProbe", true, "Log cars/traffic lights in Sushi_4_1 (diagnostic only).");
             BindWalkProbe();
@@ -1285,7 +1285,7 @@ namespace Oc2AI
             var seg = new StringBuilder();
 
             StringBuilder sb = new StringBuilder("{");
-            sb.Append("\"plugin_version\":\"0.24.9\",\"protocol_version\":10,\"session_id\":").Append(Jstr(_sessionId))
+            sb.Append("\"plugin_version\":\"0.25.0\",\"protocol_version\":10,\"session_id\":").Append(Jstr(_sessionId))
               .Append(",\"scene_epoch\":").Append(_sceneEpoch)
               .Append(",\"phase\":").Append(Jstr(Phase()))
               .Append(",\"level\":").Append(Jstr(_level))
@@ -2799,6 +2799,7 @@ namespace Oc2AI
                     .Append(",\"x\":").Append(p.x.ToString("0.0"))
                     .Append(",\"z\":").Append(p.z.ToString("0.0"));
                 AppendColliderBounds(sb, mb);
+                if (type == "plate_station") AppendHatchBack(sb, mb);
                 if (type == "washing")
                 {
                     // 洗碗进度：m_plateCount（待洗盘数）、m_cleaningTimer（当前块进度）
@@ -3166,6 +3167,67 @@ namespace Oc2AI
 
         // 站点物理占用：取 GameObject（含子物体）上所有非触发 Collider 的世界 AABB 并集。
         // 出餐口这类功能站不注册进 GridManager 占用表、nodeMap 又标可走，只能靠 collider 兜底。
+        // 出餐口背面方向（世界 XZ 单位向量）：游戏逻辑不限制送餐朝向（反编译
+        // InteractWithItemHelper.GetCollidersInArc 只看厨师朝向），但 prefab 有
+        // 背板子物体 Block_Back 挡住后侧、美术箭头指向前侧。优先取 Block_Back
+        // 相对站点中心的偏移；没有背板时退回 -transform.forward（src=forward）。
+        // 每关每个出餐口记一次日志，便于与游戏内箭头核对。
+        readonly HashSet<string> _hatchLogged = new HashSet<string>();
+
+        void AppendHatchBack(StringBuilder sb, MonoBehaviour mb)
+        {
+            try
+            {
+                Transform root = mb.transform;
+                Vector3 c = root.position;
+                Vector3 back = Vector3.zero;
+                string src = null;
+                foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (t == root || t.name != "Block_Back") continue;
+                    Vector3 p = t.position;
+                    Collider col = t.GetComponent<Collider>();
+                    if (col != null) p = col.bounds.center;
+                    back = new Vector3(p.x - c.x, 0f, p.z - c.z);
+                    src = "block_back";
+                    break;
+                }
+                if (src == null || back.sqrMagnitude < 1e-4f)
+                {
+                    Vector3 f = root.forward;
+                    back = new Vector3(-f.x, 0f, -f.z);
+                    src = "forward";
+                }
+                if (back.sqrMagnitude < 1e-4f) return;
+                back.Normalize();
+                sb.Append(",\"back_x\":").Append(back.x.ToString("0.###"))
+                  .Append(",\"back_z\":").Append(back.z.ToString("0.###"))
+                  .Append(",\"back_src\":").Append(Jstr(src));
+                string key = _sceneEpoch + ":" + root.GetInstanceID();
+                if (_hatchLogged.Add(key))
+                {
+                    var kids = new StringBuilder();
+                    foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (t == root) continue;
+                        if (kids.Length > 0) kids.Append(' ');
+                        kids.Append(t.name).Append('(')
+                            .Append((t.position.x - c.x).ToString("0.##")).Append(',')
+                            .Append((t.position.z - c.z).ToString("0.##")).Append(')');
+                    }
+                    Logger.LogInfo("[HATCH] level=" + _level + " name=" + ObjNames.Of(mb)
+                        + " pos=(" + c.x.ToString("0.##") + "," + c.z.ToString("0.##") + ")"
+                        + " yaw=" + root.eulerAngles.y.ToString("0")
+                        + " back=(" + back.x.ToString("0.##") + "," + back.z.ToString("0.##") + ")"
+                        + " src=" + src + " children=" + kids);
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.LogWarning("[STATIC] hatch back error: " + e.Message);
+            }
+        }
+
         void AppendColliderBounds(StringBuilder sb, MonoBehaviour mb)
         {
             try
